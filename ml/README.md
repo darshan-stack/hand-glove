@@ -1,116 +1,63 @@
 # ML Architecture
 
-## Goal
+## Objective
+Recognize static and dynamic hand gestures from 5 flex sensors + 6-axis IMU, adapt to individual users, reject uncertain predictions, and map accepted gestures to multilingual speech intents.
 
-The ML system is designed as a sensor-first, user-adaptive gesture recognition pipeline. Camera/VLM is an optional second modality; it is not required for the first working model.
+## End-to-end pipeline
 
-## End-to-end flow
+Raw CSV -> quality checks -> per-user calibration -> filtering -> normalization -> temporal windowing -> feature engineering -> baseline classifier -> temporal classifier -> confidence estimation -> temporal consistency -> unknown/reject gate -> intent mapping -> multilingual TTS.
 
-```text
-Raw Flex(5) + IMU(6)
-        |
-        v
-Data Quality Check
-        |
-        v
-Calibration / Baseline Correction
-        |
-        v
-Windowing (time sequence)
-        |
-        v
-Filtering + Normalization
-        |
-        +--------------------+
-        |                    |
-        v                    v
-Static Feature Branch   Temporal Branch
-        |                    |
-        v                    v
-Random Forest baseline   1D CNN / GRU/LSTM
-        |                    |
-        +---------+----------+
-                  |
-                  v
-          Prediction scores
-                  |
-                  v
-       Temporal consistency gate
-                  |
-                  v
-          Confidence / OOD gate
-             /         \
-          reject        accept
-            |             |
-         haptic       gesture ID
-                          |
-                          v
-                    Intent mapping
-                          |
-                          v
-                   Multilingual TTS
-```
+## Inputs
 
-## Feature vector
+11 raw channels: flex1..flex5, ax, ay, az, gx, gy, gz. Derived channels include acceleration magnitude and gyro magnitude. Timestamp is retained for temporal processing but is not a model feature unless explicitly engineered.
 
-At minimum each timestamp contains 11 sensor values:
+## Dataset protocol
 
-- flex1..flex5
-- ax, ay, az
-- gx, gy, gz
+Each sample contains user_id, gesture, repetition and timestamp. Collect multiple repetitions from multiple users. Keep users separated for the primary generalization test: training users, validation users, and unseen test users. Do not randomly split adjacent rows from one continuous recording across train/test.
 
-For each temporal window, derive normalized sensor values and optional statistics such as mean, standard deviation, min/max, first difference, and motion magnitude.
+Recommended first dataset: 8-12 gestures, 5+ users, 20+ repetitions per gesture/user where feasible. Start smaller for rapid prototyping, then expand.
 
-## Model strategy
+## Stage A — baseline
 
-### Stage A: Random Forest baseline
+Random Forest on window-level statistical features. Report accuracy, macro precision, macro recall, macro F1, confusion matrix and inference time.
 
-Train on window-level engineered features. It is the first model because it is fast, interpretable, CPU-friendly, and gives a reproducible baseline.
+## Stage B — temporal recognition
 
-### Stage B: Temporal model
+Use fixed-length overlapping sequences (initially 32 samples; tune using validation data). Candidate models: 1D CNN, GRU or LSTM. Use the simplest model that improves dynamic-gesture recognition without unacceptable latency.
 
-For dynamic gestures, train a small 1D CNN or GRU/LSTM on sequences. The sequence model learns how sensor values change over time instead of relying only on one pose.
+## Stage C — personalization
 
-### Stage C: Personalization
+At enrollment, collect neutral/open/closed calibration poses. Fit per-user center/scale normalization. For new gestures, store a validated embedding/prototype only after repeated consistent demonstrations and explicit label confirmation. Never silently learn a single noisy sample.
 
-Each user receives calibration statistics. Normalized values are produced relative to that user's sensor baselines/ranges. A future personalization layer can adapt the classifier using a small number of labeled examples from the new user.
+## Stage D — confidence and rejection
 
-### Stage D: Confidence and unknown rejection
+Do not speak every argmax prediction. Combine classifier confidence, temporal consistency and sensor-quality checks. If confidence is below a validation-set threshold, or signals are inconsistent, output REJECT/REPEAT and trigger haptic feedback. Thresholds must be selected on validation data, not test data.
 
-Do not speak on every argmax prediction. Require:
+## Stage E — multimodal extension
 
-1. confidence above a configured threshold;
-2. temporal agreement over consecutive windows;
-3. valid sensor quality;
-4. optional unknown/OOD score.
+Camera is a second branch, not a replacement for glove sensing. Extract visual features/hand landmarks and fuse them with the sensor representation. Compare sensor-only versus vision-only versus fused performance using the same user-separated test protocol.
 
-If any critical check fails, return `UNKNOWN` and request a repeat.
+## Stage F — multilingual intent layer
 
-## Evaluation protocol
+The classifier predicts a stable gesture/intent ID first. A separate language layer maps the intent to configured Hindi, Marathi, English or other supported phrases. This prevents language wording from changing the gesture classifier.
 
-Use user-independent splits for the main generalization experiment:
+## Real-time inference
 
-- train users: model development
-- validation users: threshold/model selection
-- held-out test users: final evaluation
+For live inference, maintain a rolling sensor buffer. Every stride samples, preprocess the newest window, run the classifier, apply temporal agreement and confidence gates, and emit speech only when an accepted prediction persists. Use cooldown/debouncing so one held gesture does not repeatedly speak.
 
-Never randomly split adjacent windows from the same continuous recording across train and test, because that can leak nearly identical samples.
+## Research experiments
 
-Report accuracy, macro precision, macro recall, macro F1, confusion matrix, rejection rate, false-accept rate, false-reject rate, and inference latency.
+1. Cross-user baseline vs personalized calibration.
+2. Static gestures vs dynamic gestures.
+3. Sensor-only vs sensor+camera fusion.
+4. With vs without confidence/rejection gate.
+5. Latency and CPU/RAM footprint on Raspberry Pi 4.
+6. Personalization sample efficiency: measure performance after 0, 1, 3, 5 and 10 demonstrations per new gesture/user.
 
-## Camera/VLM extension
+## Evaluation metrics
 
-After the sensor-only model is stable:
+Accuracy, macro precision, macro recall, macro F1, confusion matrix, rejection rate, false-accept rate, false-reject rate, per-user performance, calibration time, inference latency and resource usage.
 
-```text
-Camera frame -> vision encoder -> visual embedding
-Sensor window -> sensor encoder -> sensor embedding
-                         |
-                         v
-                  Multimodal fusion
-                         |
-                         v
-               gesture/intent decision
-```
+## Research integrity
 
-The VLM should be treated as an optional verification/context branch rather than replacing the deterministic sensor pipeline. A lightweight Pi 4 deployment should use a small/quantized model; heavy VLM inference can remain on a development computer until edge acceleration is available.
+All reported accuracy, latency and battery values must come from actual experiments. Illustrative targets in presentations must be explicitly labelled as targets. This repository does not claim patentability; novelty requires a formal prior-art search and patent examination.
